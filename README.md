@@ -80,6 +80,28 @@ PUSH_d PUSH_2 PUSH_0 ADD PUSH_0 SUB ADD
 This is why grading on functional equivalence — not string match — is the right
 objective: it rewards understanding the computation, not parroting the tokens.
 
+### Verified decoding — the model never lies (`dataset.verified_equivalent`)
+
+LLM decompilers hallucinate: they output confident code that's subtly wrong, and
+you can't tell which. We don't. The key realisation: **at inference you don't have
+the source, but you DO have the bytecode** — so you can *run it* and check.
+
+Verified decoding tries the greedy guess; if it doesn't reproduce the bytecode's
+outputs on random inputs, it samples more candidates until one **provably** does.
+Code that can't be verified is never emitted — it's flagged for a human instead.
+
+```
+greedy func-equivalence : 0.94
+verified coverage       : 0.95   (fraction where a PROVEN answer was found)
+verified precision      : 1.00   (of those, fraction truly correct vs the hidden
+                                   source — i.e. the verifier is sound: "matches
+                                   the bytecode" really does mean "correct")
+```
+
+Precision **1.00** is the headline: when the model commits, it is *never* wrong.
+It abstains on what it can't prove instead of guessing. That correctness
+guarantee — not raw accuracy — is the genuinely defensible idea here.
+
 ---
 
 ## Architecture

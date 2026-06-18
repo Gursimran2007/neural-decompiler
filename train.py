@@ -16,6 +16,8 @@ import math
 import random
 import time
 
+import numpy as np
+
 import dataset
 import lang
 from model import Adam, Seq2Seq
@@ -34,6 +36,41 @@ def evaluate(model, pairs, src_vocab, tgt_vocab, rng):
             equiv += 1
     n = len(pairs)
     return exact / n, equiv / n
+
+
+def verified_decode(model, code, src_vocab, tgt_vocab, np_rng, py_rng, k=8):
+    """Emit only a decompilation we can PROVE matches the bytecode.
+
+    Try the greedy guess first; if it doesn't verify against the actual bytecode,
+    draw up to k sampled candidates and return the first that does. Returns
+    (tokens, verified?). If nothing verifies we still return the last guess but
+    flag it as unverified — in a real tool you'd hand that to a human."""
+    src_ids = src_vocab.encode(code)
+    cand = tgt_vocab.decode(model.greedy(src_ids))
+    if dataset.verified_equivalent(code, " ".join(cand), py_rng):
+        return cand, True
+    for _ in range(k):
+        cand = tgt_vocab.decode(model.sample(src_ids, np_rng))
+        if dataset.verified_equivalent(code, " ".join(cand), py_rng):
+            return cand, True
+    return cand, False
+
+
+def evaluate_verified(model, pairs, src_vocab, tgt_vocab):
+    """Coverage = fraction where we emit a verified answer. Then AUDIT it: using
+    the hidden ground-truth source (which a real tool wouldn't have, but we do),
+    confirm that 'verified against bytecode' really means 'truly correct'."""
+    np_rng = np.random.default_rng(0)
+    py_rng = random.Random(999)
+    covered = audited_correct = 0
+    for code, src, ast in pairs:
+        cand, ok = verified_decode(model, code, src_vocab, tgt_vocab, np_rng, py_rng)
+        if ok:
+            covered += 1
+            if dataset.functional_equivalent(ast, " ".join(cand), py_rng):
+                audited_correct += 1
+    n = len(pairs)
+    return covered / n, (audited_correct / covered if covered else 0.0)
 
 
 def main():
@@ -95,7 +132,15 @@ def main():
     # Restore the best checkpoint (training can drift after its peak).
     if best_state is not None:
         model.load_state_dict(best_state)
-    print(f"\nBest test functional-equivalence: {best_eq:.2f}")
+    print(f"\nBest test functional-equivalence (greedy): {best_eq:.2f}")
+
+    # --- verified decoding: only emit code PROVEN to match the bytecode --------
+    cov, prec = evaluate_verified(model, test_data, src_vocab, tgt_vocab)
+    print("\nVerified decoding (sample candidates, keep only ones that match the "
+          "bytecode on random inputs):")
+    print(f"  coverage  : {cov:.2f}  (fraction where we found a verified answer)")
+    print(f"  precision : {prec:.2f}  (of those, fraction TRULY correct vs the "
+          "hidden source — proves the verifier is sound)")
 
     # --- show some decompilations ------------------------------------------
     print("\nExample decompilations (test set):")

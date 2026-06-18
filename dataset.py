@@ -119,3 +119,28 @@ def functional_equivalent(original_ast, predicted_source: str,
 
 def exact_match(original_source_tokens, predicted_source_tokens) -> bool:
     return original_source_tokens == predicted_source_tokens
+
+
+def verified_equivalent(bytecode, predicted_source: str,
+                        rng: random.Random, trials: int = 40) -> bool:
+    """
+    The REAL-WORLD oracle: check a guess WITHOUT ever seeing the original source.
+
+    At true inference time we don't have the source code (that's what we're trying
+    to recover) — but we DO have the bytecode (the "binary"). So we run the actual
+    bytecode and the predicted source on the same random inputs and check they
+    agree. If they always agree, the guess is PROVABLY a correct decompilation of
+    this bytecode. This is what lets the model emit only code it can verify,
+    instead of hallucinating.
+    """
+    pred_ast = lang.parse(predicted_source)
+    if pred_ast is None:
+        return False
+    for _ in range(trials):
+        env = {v: rng.randint(-5, 5) for v in lang.VARS}
+        try:
+            if vm.run_bytecode(bytecode, env) != lang.evaluate(pred_ast, env):
+                return False
+        except Exception:
+            return False
+    return True

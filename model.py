@@ -135,6 +135,33 @@ class Seq2Seq:
             prev = nxt
         return out
 
+    # -- sampling decode: like greedy but draws from the probability distribution
+    #    (temperature controls randomness). Used to produce DIVERSE candidates so
+    #    verified decoding can search for one that provably matches the bytecode.
+    def sample(self, src_ids, rng, temperature=0.8, max_len=40):
+        E, enc_last = self.encode(src_ids)
+        dec_h = enc_last
+        sos = self.tgt_vocab.stoi["<sos>"]
+        eos = self.tgt_vocab.stoi["<eos>"]
+        prev = sos
+        out = []
+        for _ in range(max_len):
+            y = self.tgt_emb[[prev]]
+            context = self.attend(dec_h, E)
+            dec_in = cat([y, context], axis=1)
+            dec_h = self.decoder(dec_in, dec_h)
+            logits = (cat([dec_h, context], axis=1) @ self.Wo + self.bo).data[0]
+            z = logits / temperature
+            z = z - z.max()
+            p = np.exp(z)
+            p /= p.sum()
+            nxt = int(rng.choice(len(p), p=p))
+            if nxt == eos:
+                break
+            out.append(nxt)
+            prev = nxt
+        return out
+
 
 class Adam:
     """Adam optimizer over a list of Tensors (standard, with bias correction)."""
