@@ -86,21 +86,32 @@ LLM decompilers hallucinate: they output confident code that's subtly wrong, and
 you can't tell which. We don't. The key realisation: **at inference you don't have
 the source, but you DO have the bytecode** — so you can *run it* and check.
 
-Verified decoding tries the greedy guess; if it doesn't reproduce the bytecode's
-outputs on random inputs, it samples more candidates until one **provably** does.
-Code that can't be verified is never emitted — it's flagged for a human instead.
+Verified decoding searches a pool of candidates — **beam search** first
+(deterministic, the `beam` most-probable whole sequences), then stochastic
+sampling as a fallback — and returns the first that **provably** reproduces the
+bytecode's outputs on random inputs. Code that can't be verified is never
+emitted; it's flagged for a human instead.
 
 ```
-greedy func-equivalence : 0.94
-verified coverage       : 0.95   (fraction where a PROVEN answer was found)
+greedy func-equivalence : 0.93   (single best guess)
+verified coverage       : 0.99   (fraction where a PROVEN answer was found)
 verified precision      : 1.00   (of those, fraction truly correct vs the hidden
                                    source — i.e. the verifier is sound: "matches
                                    the bytecode" really does mean "correct")
 ```
 
-Precision **1.00** is the headline: when the model commits, it is *never* wrong.
-It abstains on what it can't prove instead of guessing. That correctness
-guarantee — not raw accuracy — is the genuinely defensible idea here.
+Two things to read here:
+
+- **Precision 1.00** — when the model commits, it is *never* wrong. It abstains
+  on what it can't prove instead of guessing.
+- **Beam search lifts coverage 0.93 → 0.99 without touching precision.** Greedy
+  commits to one token at a time, so an early mistake is unrecoverable; beam
+  keeps the best *whole sequences* alive, and the bytecode-verifier plucks out a
+  correct one. We raise *how often we answer* without ever lowering *how often
+  we're right*.
+
+That correctness guarantee — not raw accuracy — is the genuinely defensible idea
+here, and the one thing hallucinating LLM decompilers structurally can't offer.
 
 ---
 

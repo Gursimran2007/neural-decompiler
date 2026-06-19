@@ -135,6 +135,43 @@ class Seq2Seq:
             prev = nxt
         return out
 
+    # -- beam search: keep the `beam` most-probable partial sequences at each
+    #    step instead of committing to one. Returns candidates best-first. Gives
+    #    verified decoding a diverse, high-quality pool to search for a provably
+    #    correct answer. Inference only, so we work on raw numpy (no autograd).
+    def beam_search(self, src_ids, beam=8, max_len=40):
+        E, enc_last = self.encode(src_ids)
+        sos = self.tgt_vocab.stoi["<sos>"]
+        eos = self.tgt_vocab.stoi["<eos>"]
+        # beam item: (cumulative_logprob, tokens, carried_hidden, prev_token)
+        beams = [(0.0, [], enc_last, sos)]
+        completed = []
+        for _ in range(max_len):
+            candidates = []
+            for logp, toks, dec_h, prev in beams:
+                y = self.tgt_emb[[prev]]
+                context = self.attend(dec_h, E)
+                dec_in = cat([y, context], axis=1)
+                new_h = self.decoder(dec_in, dec_h)
+                logits = (cat([new_h, context], axis=1) @ self.Wo + self.bo).data[0]
+                z = logits - logits.max()
+                logprobs = z - np.log(np.exp(z).sum())
+                for tid in np.argsort(logprobs)[-beam:]:
+                    tid = int(tid)
+                    nlogp = logp + float(logprobs[tid])
+                    if tid == eos:
+                        completed.append((nlogp, toks))
+                    else:
+                        candidates.append((nlogp, toks + [tid], new_h, tid))
+            if not candidates:
+                break
+            candidates.sort(key=lambda c: c[0], reverse=True)
+            beams = candidates[:beam]
+        completed += [(lp, tk) for lp, tk, _, _ in beams]
+        # length-normalise so we don't over-favour very short sequences
+        completed.sort(key=lambda c: c[0] / max(len(c[1]), 1), reverse=True)
+        return [toks for _, toks in completed]
+
     # -- sampling decode: like greedy but draws from the probability distribution
     #    (temperature controls randomness). Used to produce DIVERSE candidates so
     #    verified decoding can search for one that provably matches the bytecode.
