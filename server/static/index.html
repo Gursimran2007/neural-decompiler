@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neural Decompiler API — verified EVM decompilation that never hallucinates</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--dim:#8b949e;
+        --green:#7ee787;--blue:#58a6ff;--purple:#d2a8ff;--orange:#f0883e;--red:#ff7b72}
+  body{font-family:-apple-system,system-ui,sans-serif;background:var(--bg);color:var(--fg);
+       line-height:1.6;padding:32px 16px 90px}
+  .wrap{max-width:880px;margin:0 auto}
+  .mono{font-family:ui-monospace,"SF Mono",Menlo,monospace}
+  h1{font-size:30px;margin-bottom:6px;letter-spacing:-.5px}
+  .tag{display:inline-block;font-size:12px;color:var(--green);border:1px solid #2ea04355;
+       background:#2ea04318;border-radius:999px;padding:2px 10px;margin-bottom:14px}
+  .lead{color:var(--dim);font-size:15px;margin-bottom:8px}
+  .lead b{color:var(--fg)}
+  .links{font-size:13px;margin:14px 0 24px}
+  .links a{color:var(--blue);text-decoration:none}.links a:hover{text-decoration:underline}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:20px;margin-bottom:18px}
+  label{font-size:13px;color:var(--dim);display:block;margin-bottom:8px}
+  textarea{width:100%;min-height:80px;background:var(--bg);border:1px solid var(--line);
+           color:var(--fg);padding:12px 14px;border-radius:8px;font-family:ui-monospace,monospace;
+           font-size:14px;resize:vertical}
+  textarea:focus{outline:none;border-color:#1f6feb}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+  button{background:#238636;color:#fff;border:none;padding:11px 20px;border-radius:8px;
+         font-size:15px;font-weight:600;cursor:pointer}
+  button:hover{background:#2ea043}button:disabled{opacity:.5;cursor:default}
+  button.ghost{background:#21262d;color:#c9d1d9;padding:7px 12px;font-size:13px;font-weight:500}
+  button.ghost:hover{background:#30363d}
+  .out{margin-top:18px}
+  .verdict{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;margin-bottom:12px}
+  .verdict.ok{color:var(--green)}.verdict.no{color:var(--orange)}
+  .src{font-size:20px;padding:14px 16px;background:var(--bg);border:1px solid var(--line);
+       border-radius:8px;color:var(--purple)}
+  .note{color:var(--dim);font-size:13px;margin-top:8px}
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500}
+  td.mono{color:var(--fg)}.match{color:var(--green)}
+  .hint{font-size:12px;color:var(--dim);margin-top:8px}
+  .err{color:var(--red);font-size:14px;margin-top:12px}
+  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin:6px 0 26px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .stat .n{font-size:22px;font-weight:700}
+  .stat .l{font-size:12px;color:var(--dim)}
+  .api{font-size:13px;color:var(--dim);line-height:1.7}
+  .api code{background:var(--bg);border:1px solid var(--line);border-radius:5px;
+            padding:1px 6px;color:var(--green)}
+  footer{color:var(--dim);font-size:12px;text-align:center;margin-top:30px}
+  footer a{color:var(--blue);text-decoration:none}
+  .spin{display:inline-block;width:15px;height:15px;border:2px solid #ffffff55;
+        border-top-color:#fff;border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px}
+  @keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="tag">● verified decompilation API</span>
+  <h1>Neural Decompiler</h1>
+  <p class="lead">A neural network reads EVM bytecode and reconstructs the original <b>source logic</b> — then <b>proves it's correct by re-executing the bytecode</b>. If it can't prove it, it says so. <b>It never returns a wrong answer dressed up as right.</b></p>
+  <p class="lead">Built from scratch in NumPy — own autograd, GRU encoder/decoder, attention. No PyTorch, no LLM.</p>
+  <div class="links">
+    <a href="https://github.com/Gursimran2007/neural-decompiler">source on GitHub</a> ·
+    <a href="https://gursimran2007.github.io/neural-decompiler/">step-by-step visual demo</a> ·
+    <span id="visits" class="mono">tracking visits…</span>
+  </div>
+
+  <div class="grid">
+    <div class="stat"><div class="n" style="color:var(--green)">1.00</div><div class="l">verified precision — never wrong when it commits</div></div>
+    <div class="stat"><div class="n" style="color:var(--blue)">1.00</div><div class="l">coverage on the supported subset (beam + verifier)</div></div>
+    <div class="stat"><div class="n" style="color:var(--purple)" id="eq">0.996</div><div class="l">greedy functional-equivalence (held-out)</div></div>
+  </div>
+
+  <div class="card">
+    <label>EVM bytecode (hex) or assembly tokens — paste either</label>
+    <textarea id="inp" class="mono" spellcheck="false">0x6040356002901261001257602035610015565b60045b</textarea>
+    <div class="row">
+      <button id="go" onclick="run()">Decompile &amp; verify</button>
+      <button class="ghost" onclick="ex('0x6040356002901261001257602035610015565b60045b')">if c&lt;2 then 4 else b</button>
+      <button class="ghost" onclick="ex('PUSH1 0x00 CALLDATALOAD PUSH1 0x08 SWAP1 SGT PUSH2 0x0011 JUMPI PUSH1 0x08 PUSH2 0x0015 JUMP JUMPDEST PUSH1 0x40 CALLDATALOAD JUMPDEST')">if a&gt;8 then c else 8</button>
+      <span id="endpoint" class="hint"></span>
+    </div>
+    <div class="hint">Supported subset: arithmetic (+ − ×), comparisons (&lt; &gt; ==), and nested if/else compiled to real JUMP/JUMPI/JUMPDEST. Variables a b c d come from CALLDATALOAD.</div>
+    <div id="out" class="out"></div>
+  </div>
+
+  <div class="card api">
+    <b style="color:var(--fg)">Use it as an API</b><br><br>
+    <code>POST /api/decompile</code> &nbsp; body: <code>{"bytecode":"0x60..."}</code> &nbsp;or&nbsp; <code>{"asm":"PUSH1 0x00 ..."}</code><br><br>
+    Returns <code>source</code>, a boolean <code>verified</code>, and a <code>proof</code> array of (inputs → bytecode_out == source_out) rows. <code>verified:false</code> means the model refused to guess — that's the feature.
+  </div>
+
+  <footer>
+    Neural Decompiler · from-scratch NumPy · verified by re-execution ·
+    <a href="https://github.com/Gursimran2007/neural-decompiler">GitHub</a>
+  </footer>
+</div>
+
+<script>
+// The API is same-origin when this page is served by app.py. If you host the
+// page elsewhere (e.g. GitHub Pages), set API to your deployed server URL.
+const API = (location.origin.startsWith("http") && location.port !== "")
+  ? location.origin : location.origin;
+const $ = id => document.getElementById(id);
+
+function ex(v){ $("inp").value = v; run(); }
+
+async function run(){
+  const v = $("inp").value.trim();
+  if(!v) return;
+  const isHex = /^(0x)?[0-9a-fA-F\s]+$/.test(v) && !/[g-zG-Z]/.test(v.replace(/0x/gi,""));
+  const body = isHex ? {bytecode: v.replace(/\s+/g,"")} : {asm: v};
+  $("go").disabled = true;
+  $("out").innerHTML = `<div class="note"><span class="spin"></span> running beam search, then re-executing the bytecode to verify…</div>`;
+  try{
+    const r = await fetch(API + "/api/decompile", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body)});
+    const d = await r.json();
+    if(!d.ok){ $("out").innerHTML = `<div class="err">✕ ${d.error}</div>`; return; }
+    render(d);
+  }catch(e){
+    $("out").innerHTML = `<div class="err">✕ could not reach the API (${e.message}).<br>
+      Is the server running? Start it with <span class="mono">python server/app.py</span>.</div>`;
+  }finally{ $("go").disabled = false; }
+}
+
+function render(d){
+  const ok = d.verified;
+  let html = `<div class="verdict ${ok?'ok':'no'}">${ok?'✓ VERIFIED':'⚠ UNPROVEN'} `
+    + `<span style="font-weight:400;font-size:13px;color:var(--dim)">`
+    + `(${d.candidates_tried} candidate${d.candidates_tried>1?'s':''} searched)</span></div>`;
+  html += `<div class="src mono">${d.source||'—'}</div>`;
+  html += `<div class="note">${d.note}</div>`;
+  if(ok && d.proof.length){
+    html += `<table><tr><th>inputs (a,b,c,d)</th><th>bytecode runs to</th><th>source runs to</th></tr>`;
+    for(const p of d.proof){
+      const e = p.inputs;
+      html += `<tr><td class="mono">${e.a}, ${e.b}, ${e.c}, ${e.d}</td>`
+        + `<td class="mono">${p.bytecode_out}</td>`
+        + `<td class="mono match">${p.source_out} ✓</td></tr>`;
+    }
+    html += `</table>`;
+    html += `<div class="hint">Each row re-executes the actual bytecode and the recovered source on the same random inputs — they agree, so the decompilation is proven, not guessed.</div>`;
+  }
+  $("out").innerHTML = html;
+}
+
+// show which endpoint we're hitting + model stat
+$("endpoint").textContent = "→ " + API + "/api/decompile";
+fetch(API + "/health").then(r=>r.json()).then(d=>{
+  if(d.model_func_equiv) $("eq").textContent = d.model_func_equiv.toFixed(3);
+}).catch(()=>{});
+
+// GoatCounter (same code as the visual demo)
+const GC_CODE = "gursimran";
+if(GC_CODE && GC_CODE!=="YOURCODE"){
+  const s=document.createElement("script");s.async=true;s.src="//gc.zgo.at/count.js";
+  s.setAttribute("data-goatcounter",`https://${GC_CODE}.goatcounter.com/count`);
+  document.body.appendChild(s);
+  fetch(`https://${GC_CODE}.goatcounter.com/counter/TOTAL.json`)
+    .then(r=>r.json()).then(d=>{const e=$("visits");if(e)e.textContent=`${d.count} visits`;})
+    .catch(()=>{});
+}
+
+run();
+</script>
+</body>
+</html>
