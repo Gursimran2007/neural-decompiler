@@ -2,6 +2,8 @@
 
 **[▶ Live interactive demo](https://gursimran2007.github.io/neural-decompiler/)** — watch the machine shred your code into EVM bytecode and rebuild the structure step by step.
 
+**[⚙ Verified-decompilation API](server/)** — a real deployable web service: `POST /api/decompile` returns the recovered source **plus a re-execution proof** that it matches the bytecode (or `verified:false` instead of guessing). Pure stdlib + NumPy, one container, deploy-anywhere.
+
 A neural network that **reverses compilation**: it reads flat stack-machine
 bytecode and reconstructs the original nested source expression that produced it.
 
