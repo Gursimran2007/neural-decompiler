@@ -1,5 +1,7 @@
 # Neural Decompiler
 
+**[▶ Live interactive demo](https://gursimran2007.github.io/neural-decompiler/)** — watch the machine shred your code into EVM bytecode and rebuild the structure step by step.
+
 A neural network that **reverses compilation**: it reads flat stack-machine
 bytecode and reconstructs the original nested source expression that produced it.
 
@@ -59,6 +61,7 @@ With **verified decoding** (beam search + the bytecode oracle, see below):
 | toy bytecode, obfuscated | **0.99** | **1.00** |
 | **real EVM bytecode**, clean | **1.00** | **1.00** |
 | **real EVM bytecode**, obfuscated | **1.00** | **1.00** |
+| **real EVM bytecode + control flow** (`if/else` via JUMP/JUMPI) | **1.00** | **1.00** |
 
 The model reconstructs deeply nested expressions exactly, e.g.
 
@@ -162,9 +165,72 @@ the rest: JUMP/JUMPI/JUMPDEST (control flow), MLOAD/MSTORE (memory),
 ```
 
 So: our model handles the **arithmetic core** (~40% of real opcodes) perfectly
-and verifiably. The clear next milestone is control flow + storage + memory,
-extending the same VM and the same verified-by-re-execution oracle. Stated
-plainly so the scope is never oversold.
+and verifiably. The single biggest missing piece that gap flagged was **control
+flow** (JUMP/JUMPI/JUMPDEST) — and that is the milestone below, now done.
+
+---
+
+## The control-flow milestone: recovering `if/else` from jump-soup (`cf*.py`)
+
+Arithmetic is straight-line: tokens execute in order. **Control flow is the hard
+part of real decompilation**, because an `if` in the source has *no `if` in the
+bytecode* — Solidity compiles it to a conditional jump over a block:
+
+```
+if cond then THEN else ELSE
+   ⇣ compiles to ⇣
+<cond> ; PUSH2 Ltrue ; JUMPI ; <ELSE> ; PUSH2 Lend ; JUMP
+Ltrue: JUMPDEST ; <THEN> ; Lend: JUMPDEST
+```
+
+Decompiling means recovering the nested `if/else` structure back out of that flat
+jump-soup — following absolute byte addresses to their `JUMPDEST` landing pads
+and re-nesting the branches. This is exactly what Ghidra / Hex-Rays call
+**control-flow structuring**.
+
+What's *real* here (`cfevm.py`) — a genuine **program-counter machine**, not a
+straight-line one:
+
+- **Real control-flow opcodes & bytes** — `JUMP=0x56`, `JUMPI=0x57`,
+  `JUMPDEST=0x5b`, signed comparisons `SLT=0x12`, `SGT=0x13`, `EQ=0x14`, and
+  `PUSH2=0x61` carrying a **2-byte jump address** — exactly how Solidity emits
+  targets.
+- **A two-pass assembler** resolves jump addresses (pass 1 assigns a byte
+  program-counter to every instruction and records each `JUMPDEST`; pass 2 fills
+  the `PUSH2` targets) — the same thing a real assembler does.
+- **A PC interpreter that follows the jumps** — `JUMP`/`JUMPI` move execution to a
+  byte offset that *must* land on a `JUMPDEST` (validated, like a real node),
+  with 256-bit modular arithmetic and signed two's-complement comparisons.
+
+The VM is verified before any ML (`check_cf.py`): **0 mismatches on 4000 programs
+× 6 inputs**, AST-eval == bytecode-eval, both branches of every `if` exercised,
+and bytecode round-trips through real hex.
+
+### Results — the model reads the jumps
+
+The **same from-scratch seq2seq+attention model**, trained on 1,500 control-flow
+programs (1,011 with `if/else`, depth ≤ 2, including **nested** conditionals):
+
+| Metric | Score |
+|---|---|
+| greedy functional-equivalence (best) | **1.00** |
+| verified coverage (re-execute through the jumps) | **1.00** |
+| verified precision | **1.00** |
+
+It recovers nested branches exactly, straight out of the jump addresses:
+
+```
+PUSH1 0x40 CALLDATALOAD PUSH1 0x40 CALLDATALOAD ADD PUSH1 0x20 CALLDATALOAD
+SWAP1 SLT PUSH2 0x0016 JUMPI PUSH1 0x02 PUSH2 0x002c JUMP JUMPDEST PUSH1 0x09
+PUSH1 0x20 CALLDATALOAD EQ PUSH2 0x0027 JUMPI PUSH1 0x06 PUSH2 0x002b JUMP
+JUMPDEST PUSH1 0x00 CALLDATALOAD JUMPDEST JUMPDEST
+  ->  ( if ( ( c + c ) < b ) then ( if ( 9 == b ) then a else 6 ) else 2 )
+```
+
+The verifier is the same moat, now **re-executing bytecode that contains real
+jumps** (`cfdataset.verified_equivalent`): a "verified" answer is provably a
+correct decompilation of that control flow, with no source needed — exactly how
+you'd check a guess against an on-chain contract.
 
 ---
 
@@ -211,6 +277,11 @@ wobble can't cost us the peak model.
 | `evm_dataset.py` | EVM data engine + the re-execution oracle (`verified_equivalent`). |
 | `evm_train.py` | Trains/evaluates on EVM bytecode with verified + beam decoding; `--obfuscate`, `--repl`. |
 | `evm_fetch.py` | Pulls real mainnet contracts from a public RPC and reports the honest opcode-coverage gap. |
+| `cflang.py` | **Control-flow source language**: arithmetic + comparisons + `if/else`. Generator / renderer / evaluator / parser, all agreeing on meaning. |
+| `cfevm.py` | **EVM machine with real control flow**: `if` → conditional jumps, a two-pass jump-address assembler, and a program-counter interpreter that follows JUMP/JUMPI. |
+| `check_cf.py` | Verifies the control-flow VM: AST-eval == bytecode-eval (following the jumps), both branches exercised, bytes round-trip. |
+| `cfdataset.py` | Control-flow data engine + the re-execution oracle that follows jumps (`verified_equivalent`). |
+| `cftrain.py` | Trains/evaluates on control-flow bytecode with verified + beam decoding; `--repl`. |
 
 ---
 
@@ -250,6 +321,16 @@ wobble can't cost us the peak model.
 
 # 7. pull real mainnet contracts and see the honest coverage gap
 /opt/anaconda3/bin/python evm_fetch.py
+
+# --- CONTROL-FLOW track (recover if/else from real JUMP/JUMPI) ---
+# 8. verify the control-flow VM (eval == bytecode, following the jumps)
+/opt/anaconda3/bin/python check_cf.py
+
+# 9. train + verified-decode on bytecode with REAL control flow
+/opt/anaconda3/bin/python cftrain.py
+/opt/anaconda3/bin/python cftrain.py --repl
+#   > PUSH1 0x40 CALLDATALOAD PUSH1 0x02 SWAP1 SLT PUSH2 0x0012 JUMPI ...
+#   -> ( if ( c < 2 ) then 4 else b )
 ```
 
 ### Key flags

@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neural Decompiler — the machine, exposed</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
+    --green:#7ee787; --blue:#58a6ff; --purple:#d2a8ff; --orange:#f0883e;
+  }
+  body{ font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
+        line-height:1.55; padding:26px 16px 90px; }
+  .wrap{ max-width:960px; margin:0 auto; }
+  h1{ font-size:26px; margin-bottom:4px; }
+  .sub{ color:var(--dim); margin-bottom:20px; font-size:14px; }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:16px; }
+  .mono{ font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  label{ font-size:13px; color:var(--dim); display:block; margin-bottom:8px; }
+  .input-row{ display:flex; gap:10px; flex-wrap:wrap; }
+  #expr{ flex:1; min-width:240px; font-family:ui-monospace,monospace; font-size:16px;
+    background:var(--bg); border:1px solid var(--line); color:var(--fg); padding:12px 14px; border-radius:8px; }
+  #expr:focus{ outline:none; border-color:#1f6feb; }
+  button{ background:#238636; color:#fff; border:none; padding:11px 18px; border-radius:8px;
+    font-size:15px; font-weight:600; cursor:pointer; }
+  button:hover{ background:#2ea043; }
+  button:disabled{ opacity:.4; cursor:default; }
+  button.ghost{ background:#21262d; color:#c9d1d9; padding:7px 12px; font-size:13px; }
+  button.ghost:hover{ background:#30363d; }
+  .chips-presets{ display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  .err{ color:#f85149; font-size:14px; margin-top:10px; min-height:18px; }
+  .section-title{ font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; margin-bottom:10px; }
+
+  /* ---- the machine ---- */
+  .machine{ position:relative; overflow:hidden; }
+  .gears{ position:absolute; inset:0; pointer-events:none; opacity:.05; z-index:0; }
+  .gear{ position:absolute; transform-origin:50% 50%; }
+  .machine.playing .gear.g1{ animation:spin 6s linear infinite; }
+  .machine.playing .gear.g2{ animation:spin 4s linear infinite reverse; }
+  .machine.playing .gear.g3{ animation:spin 9s linear infinite; }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+  .machine > *{ position:relative; z-index:1; }
+
+  .phasebar{ display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .badge{ font-size:11px; font-weight:700; padding:3px 10px; border-radius:20px; letter-spacing:.4px; text-transform:uppercase; }
+  .badge.compile{ background:#1f6feb22; color:var(--blue); border:1px solid #1f6feb55; }
+  .badge.decompile{ background:#f0883e22; color:var(--orange); border:1px solid #f0883e66; }
+  .breadcrumb{ font-size:12px; color:var(--dim); }
+  .breadcrumb b{ color:var(--orange); }
+
+  /* tape */
+  .tape-title{ font-size:11px; color:var(--dim); margin-bottom:6px; }
+  .tape{ display:flex; flex-wrap:wrap; gap:7px; padding:10px; background:#0a0d12; border:1px solid var(--line);
+         border-radius:10px; min-height:54px; }
+  .cell{ font-family:ui-monospace,monospace; font-size:13px; padding:6px 9px; border-radius:7px;
+         border:1px solid var(--line); background:#0d1117; transition:transform .18s, box-shadow .18s, opacity .25s; }
+  .cell.push{ color:var(--green); }
+  .cell.load{ color:var(--green); border-color:#2ea04344; }
+  .cell.opc{ color:var(--purple); border-color:#7c3aed55; }
+  .cell.cmp{ color:var(--blue); border-color:#1f6feb55; }
+  .cell.ctrl{ color:var(--orange); border-color:#f0883e66; font-weight:600; }
+  .cell.ghost{ opacity:.18; }
+  .cell.head{ transform:translateY(-4px) scale(1.06); box-shadow:0 0 0 2px var(--orange), 0 6px 16px #f0883e44; }
+  .cell.emit{ transform:translateY(-4px) scale(1.06); box-shadow:0 0 0 2px var(--blue); }
+
+  /* work area */
+  .work{ display:grid; grid-template-columns:1fr 320px; gap:14px; margin-top:14px; }
+  @media(max-width:740px){ .work{ grid-template-columns:1fr; } }
+  .pane{ background:#0a0d12; border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .pane .hd{ font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.5px; margin-bottom:10px; }
+  .stack{ display:flex; flex-direction:column-reverse; gap:8px; min-height:120px; justify-content:flex-end; }
+  .scard{ border:1px dashed #30363d; border-radius:9px; padding:8px; background:#0d1117;
+          animation:pop .22s ease; align-self:flex-start; }
+  .scard.top{ border-style:solid; border-color:var(--orange); box-shadow:0 0 0 1px #f0883e33; }
+  .scard .stip{ font-size:9px; color:var(--orange); text-transform:uppercase; letter-spacing:.5px; margin-bottom:5px; }
+  @keyframes pop{ from{ transform:translateY(8px) scale(.92); opacity:0; } to{ transform:none; opacity:1; } }
+  .stack-empty{ color:#3d444d; font-size:13px; font-style:italic; padding:8px; }
+
+  /* AST nodes (shared by tree + stack cards) */
+  .node{ display:inline-flex; flex-direction:column; align-items:center; border-radius:8px; padding:4px; margin:1px; border:1px solid; transition:box-shadow .15s; }
+  .node .lbl{ font-size:12px; font-weight:700; padding:1px 7px; border-radius:6px; margin-bottom:3px; font-family:ui-monospace,monospace; }
+  .node.op{ border-color:#7c3aed55; background:#7c3aed12; }
+  .node.op>.lbl{ background:#7c3aed30; color:var(--purple); }
+  .node.ctrl{ border-color:#f0883e66; background:#f0883e12; }
+  .node.ctrl>.lbl{ background:#f0883e30; color:var(--orange); }
+  .node.leaf{ padding:6px 11px; font-weight:700; font-family:ui-monospace,monospace; }
+  .node.num{ border-color:#2ea04366; color:var(--green); background:#2ea04312; }
+  .node.var{ border-color:#1f6feb66; color:var(--blue); background:#1f6feb12; }
+  .node.hi{ box-shadow:0 0 0 2px var(--blue), 0 0 14px #1f6feb66; }
+  .kids{ display:flex; gap:5px; align-items:flex-end; }
+  .kid{ display:flex; flex-direction:column; align-items:center; }
+  .kid .role{ font-size:9px; color:var(--dim); margin-bottom:2px; text-transform:uppercase; letter-spacing:.4px; }
+
+  /* commentary + controls */
+  .ticker{ margin-top:14px; background:#0a0d12; border:1px solid var(--line); border-left:3px solid var(--orange);
+           border-radius:8px; padding:11px 13px; font-size:14px; min-height:46px; }
+  .ticker .k{ font-family:ui-monospace,monospace; font-weight:700; }
+  .controls{ display:flex; align-items:center; gap:10px; margin-top:14px; flex-wrap:wrap; }
+  .controls .spacer{ flex:1; }
+  .ctlbtn{ background:#21262d; color:var(--fg); border:1px solid var(--line); width:42px; height:38px;
+           border-radius:9px; font-size:16px; display:flex; align-items:center; justify-content:center; cursor:pointer; }
+  .ctlbtn:hover{ background:#30363d; }
+  .ctlbtn.play{ background:#238636; border-color:#2ea043; width:54px; }
+  .ctlbtn.play:hover{ background:#2ea043; }
+  .progress{ flex:1; min-width:160px; height:8px; background:#21262d; border-radius:5px; overflow:hidden; }
+  .progress > div{ height:100%; background:linear-gradient(90deg,var(--blue),var(--orange)); width:0; transition:width .12s; }
+  .speed{ display:flex; align-items:center; gap:6px; font-size:12px; color:var(--dim); }
+  .stepcount{ font-size:12px; color:var(--dim); font-family:ui-monospace,monospace; min-width:74px; text-align:right; }
+  .hexline{ font-family:ui-monospace,monospace; font-size:11px; color:var(--blue); word-break:break-all;
+            margin-top:10px; background:#0a0d12; border:1px solid var(--line); border-radius:6px; padding:7px 9px; }
+
+  /* result + proof */
+  .result{ font-family:ui-monospace,monospace; font-size:18px; text-align:center; padding:13px;
+           background:var(--bg); border:1px dashed #2ea043; border-radius:8px; color:var(--green); transition:border-color .2s; }
+  .result.building{ border-color:var(--orange); color:#f7c08a; }
+  .result .grow{ transition:opacity .12s; }
+  .result .cursor{ color:var(--orange); animation:blink 1s steps(1) infinite; margin-left:1px; }
+  @keyframes blink{ 50%{ opacity:0; } }
+  .verify-row{ display:flex; gap:10px; flex-wrap:wrap; }
+  .vbox{ flex:1; min-width:160px; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:11px; font-size:13px; }
+  .ok{ color:#3fb950; font-weight:700; } .bad{ color:#f85149; font-weight:700; }
+  .verdict{ background:var(--bg); border:1px solid #2ea043; border-radius:8px; padding:12px; margin-top:10px; font-size:14px; }
+  .verdict.fail{ border-color:#f85149; }
+  .hidden{ display:none; }
+  code{ font-family:ui-monospace,monospace; color:var(--orange); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🧠 Neural Decompiler — the machine, exposed</h1>
+  <div class="sub">Watch it work like a glass-backed watch. Your code gets <b>shredded into flat machine code</b> (every <code>if</code> becomes a raw jump), then the decompiler <b>rebuilds the structure one instruction at a time</b> — you can see its working memory (the stack) and the tree assembling live. Press <b>▶</b> and watch the gears turn.</div>
+  <div class="sub" style="margin-top:-12px;font-size:12px;">
+    Built from scratch in NumPy ·
+    <a href="https://github.com/Gursimran2007/neural-decompiler" style="color:var(--blue);">source on GitHub</a>
+    · <span id="visits" style="color:var(--dim);">tracking visits…</span>
+  </div>
+
+  <div class="card">
+    <label>Your code — variables <span class="mono">a b c d</span>, numbers, <span class="mono">+ - *</span>, comparisons <span class="mono">&lt; &gt; ==</span>, and <span class="mono">if C then X else Y</span></label>
+    <div class="input-row">
+      <input id="expr" class="mono" value="if a < b then a else b" spellcheck="false" autocomplete="off">
+      <button onclick="load()">⤓ Load into machine</button>
+    </div>
+    <div class="chips-presets">
+      <button class="ghost" onclick="setEx('if a < b then a else b')">min(a,b)</button>
+      <button class="ghost" onclick="setEx('if a > 0 then a else 0 - a')">abs(a)</button>
+      <button class="ghost" onclick="setEx('a + b * 3')">a + b*3</button>
+      <button class="ghost" onclick="setEx('(a + b) * (c - 2)')">(a+b)*(c-2)</button>
+      <button class="ghost" onclick="setEx('if a > b then a + c else b * 2')">branch arith</button>
+      <button class="ghost" onclick="setEx('if a > b then (if a > c then a else c) else (if b > c then b else c)')">max(a,b,c)</button>
+    </div>
+    <div class="err" id="err"></div>
+  </div>
+
+  <div id="stage" class="hidden">
+    <div class="card machine" id="machine">
+      <div class="gears">
+        <svg class="gear g1" width="120" height="120" viewBox="0 0 100 100" style="top:-20px;left:-18px"><path id="gpath" d="M50 8l6 10 11-3 1 12 11 5-6 10 6 10-11 5-1 12-11-3-6 10-6-10-11 3-1-12-11-5 6-10-6-10 11-5 1-12 11 3z" fill="#fff"/><circle cx="50" cy="50" r="14" fill="#0d1117"/></svg>
+        <svg class="gear g2" width="90" height="90" viewBox="0 0 100 100" style="bottom:-22px;right:60px"><use href="#gpath"/><circle cx="50" cy="50" r="14" fill="#0d1117"/></svg>
+        <svg class="gear g3" width="150" height="150" viewBox="0 0 100 100" style="top:30px;right:-40px"><use href="#gpath"/><circle cx="50" cy="50" r="14" fill="#0d1117"/></svg>
+      </div>
+
+      <div class="phasebar">
+        <span class="badge" id="phaseBadge">compile</span>
+        <span class="breadcrumb" id="crumb"></span>
+      </div>
+
+      <div class="tape-title">① BYTECODE TAPE <span style="color:#6e7681">— the read-head (orange ring) is where the machine is looking</span></div>
+      <div class="tape" id="tape"></div>
+      <div class="hexline" id="hex"></div>
+
+      <div class="work">
+        <div class="pane">
+          <div class="hd" id="leftHd">SOURCE STRUCTURE</div>
+          <div id="treePane"></div>
+        </div>
+        <div class="pane">
+          <div class="hd">② THE STACK — the model's working memory</div>
+          <div class="stack" id="stack"></div>
+        </div>
+      </div>
+
+      <div class="ticker" id="ticker">Press ▶ to run the machine.</div>
+
+      <div class="controls">
+        <div class="ctlbtn" id="btnRestart" title="restart" onclick="restart()">⏮</div>
+        <div class="ctlbtn" id="btnBack" title="step back" onclick="stepBack()">◀</div>
+        <div class="ctlbtn play" id="btnPlay" title="play / pause" onclick="togglePlay()">▶</div>
+        <div class="ctlbtn" id="btnFwd" title="step forward" onclick="stepFwd()">▶</div>
+        <div class="ctlbtn" id="btnEnd" title="skip to end" onclick="toEnd()">⏭</div>
+        <div class="progress" onclick="seekBar(event)"><div id="progFill"></div></div>
+        <div class="stepcount" id="stepCount">0 / 0</div>
+        <div class="speed">⏱<input type="range" id="speed" min="120" max="1400" value="650" step="20"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">③ Rebuilt readable code</div>
+      <div class="result" id="result">—</div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">④ Proof — run BOTH on random inputs</div>
+      <div class="verify-row" id="verify"></div>
+      <div class="verdict" id="verdict">Finish the run to prove correctness.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================================
+   Faithful JS port of the project (lang/vm/evm) with REAL control flow, plus a
+   fully instrumented, frame-by-frame visual machine. Every instruction is a
+   visible step: the tape read-head, the working-memory stack, and the tree.
+   All arithmetic mod 2^256 like the real EVM (BigInt).
+============================================================================ */
+const VARS=["a","b","c","d"];
+const VAR_OFFSET={a:0x00,b:0x20,c:0x40,d:0x60};
+const OFF2VAR={0x00:"a",0x20:"b",0x40:"c",0x60:"d"};
+const MOD=1n<<256n, HALF=MOD>>1n;
+const mod=x=>((x%MOD)+MOD)%MOD;
+const toSigned=x=>(x>=HALF?x-MOD:x);
+const signed=x=>toSigned(x).toString();
+
+/* ---- tokenize ---- */
+function tokenize(s){
+  const t=[]; let i=0;
+  while(i<s.length){
+    const ch=s[i];
+    if(ch===" "||ch==="\t"){i++;}
+    else if("()+-*<>".includes(ch)){t.push(ch);i++;}
+    else if(ch==="="){ if(s[i+1]==="="){t.push("==");i+=2;} else throw new Error("single '=' isn't valid — did you mean '=='?"); }
+    else if(ch>="0"&&ch<="9"){let j=i;while(j<s.length&&s[j]>="0"&&s[j]<="9")j++;t.push(s.slice(i,j));i=j;}
+    else if(ch>="a"&&ch<="z"){let j=i;while(j<s.length&&s[j]>="a"&&s[j]<="z")j++;t.push(s.slice(i,j));i=j;}
+    else throw new Error("bad character '"+ch+"'");
+  }
+  return t;
+}
+/* ---- parse ---- */
+const KEYWORDS=["if","then","else"];
+function parse(tokens){
+  let pos=0; const peek=()=>tokens[pos], eat=()=>tokens[pos++];
+  const expect=k=>{ if(eat()!==k)throw new Error("expected '"+k+"'"); };
+  function conditional(){
+    if(peek()==="if"){ eat(); const c=conditional(); expect("then"); const t=conditional(); expect("else"); const e=conditional(); return ["if",c,t,e]; }
+    return compare();
+  }
+  function compare(){ let n=addsub(); while(peek()==="<"||peek()===">"||peek()==="=="){ const op=eat(); n=["op",op,n,addsub()]; } return n; }
+  function addsub(){ let n=term(); while(peek()==="+"||peek()==="-"){ const op=eat(); n=["op",op,n,term()]; } return n; }
+  function term(){ let n=factor(); while(peek()==="*"){ eat(); n=["op","*",n,factor()]; } return n; }
+  function factor(){
+    const t=peek();
+    if(t==="("){ eat(); const n=conditional(); if(eat()!==")")throw new Error("missing )"); return n; }
+    if(t===undefined)throw new Error("unexpected end of input");
+    if(KEYWORDS.includes(t))throw new Error("unexpected keyword '"+t+"'");
+    eat();
+    if(/^[0-9]+$/.test(t))return ["num",parseInt(t,10)];
+    if(VARS.includes(t))return ["var",t];
+    throw new Error("unexpected token '"+t+"' (variables must be a, b, c or d)");
+  }
+  const ast=conditional();
+  if(pos!==tokens.length)throw new Error("leftover tokens — check your parentheses / keywords");
+  return ast;
+}
+function parseSource(s){return parse(tokenize(s));}
+function assignIds(ast){ let c=0; (function w(n){ n.id=c++; if(n[0]==="num"||n[0]==="var")return; if(n[0]==="if"){w(n[1]);w(n[2]);w(n[3]);} else {w(n[2]);w(n[3]);} })(ast); }
+
+/* ---- render text + eval ---- */
+function render(ast){
+  if(ast[0]==="num")return String(ast[1]);
+  if(ast[0]==="var")return ast[1];
+  if(ast[0]==="if")return "( if "+render(ast[1])+" then "+render(ast[2])+" else "+render(ast[3])+" )";
+  return "( "+render(ast[2])+" "+ast[1]+" "+render(ast[3])+" )";
+}
+function evalAst(ast,env){
+  if(ast[0]==="num")return mod(BigInt(ast[1]));
+  if(ast[0]==="var")return mod(BigInt(env[ast[1]]));
+  if(ast[0]==="if")return evalAst(ast[1],env)!==0n?evalAst(ast[2],env):evalAst(ast[3],env);
+  const l=evalAst(ast[2],env), r=evalAst(ast[3],env);
+  switch(ast[1]){
+    case"+":return mod(l+r); case"-":return mod(l-r); case"*":return mod(l*r);
+    case"<":return toSigned(l)<toSigned(r)?1n:0n;
+    case">":return toSigned(l)>toSigned(r)?1n:0n;
+    case"==":return l===r?1n:0n;
+  }
+}
+/* ---- tree -> HTML (shared) ---- */
+function treeHTML(ast){
+  const id=(ast.id!==undefined)?` data-id="${ast.id}"`:"";
+  if(ast[0]==="num")return `<div class="node leaf num"${id}>${ast[1]}</div>`;
+  if(ast[0]==="var")return `<div class="node leaf var"${id}>${ast[1]}</div>`;
+  if(ast[0]==="if")return `<div class="node ctrl"${id}><div class="lbl">if</div><div class="kids">${kid("cond",ast[1])}${kid("then",ast[2])}${kid("else",ast[3])}</div></div>`;
+  return `<div class="node op"${id}><div class="lbl">${ast[1]}</div><div class="kids">${kid("",ast[2])}${kid("",ast[3])}</div></div>`;
+}
+function kid(role,a){ return `<div class="kid">${role?`<div class="role">${role}</div>`:""}${treeHTML(a)}</div>`; }
+
+/* ---- compile AST -> items (with node ids) ---- */
+let LBL=0;
+function compileItems(ast,out){
+  const nid=ast.id;
+  if(ast[0]==="num"){ out.push({op:"PUSH1",arg:ast[1]&0xff,nid,lit:true}); return; }
+  if(ast[0]==="var"){ out.push({op:"PUSH1",arg:VAR_OFFSET[ast[1]],nid,off:true}); out.push({op:"CALLDATALOAD",nid,vn:ast[1]}); return; }
+  if(ast[0]==="if"){
+    const Lt=LBL++, Le=LBL++;
+    compileItems(ast[1],out);
+    out.push({op:"PUSH2",target:Lt,nid}); out.push({op:"JUMPI",nid});
+    compileItems(ast[3],out);
+    out.push({op:"PUSH2",target:Le,nid}); out.push({op:"JUMP",nid});
+    out.push({op:"JUMPDEST",label:Lt,nid}); compileItems(ast[2],out);
+    out.push({op:"JUMPDEST",label:Le,nid}); return;
+  }
+  compileItems(ast[2],out); compileItems(ast[3],out);
+  switch(ast[1]){
+    case"+":out.push({op:"ADD",nid});break;
+    case"*":out.push({op:"MUL",nid});break;
+    case"-":out.push({op:"SWAP1",nid});out.push({op:"SUB",nid});break;
+    case"<":out.push({op:"SWAP1",nid});out.push({op:"SLT",nid});break;
+    case">":out.push({op:"SWAP1",nid});out.push({op:"SGT",nid});break;
+    case"==":out.push({op:"EQ",nid});break;
+  }
+}
+const SIZE=op=>op==="PUSH1"?2:op==="PUSH2"?3:1;
+function compile(ast){
+  LBL=0; const items=[]; compileItems(ast,items);
+  let pc=0; const labelPc={};
+  for(const it of items){ it.pc=pc; if(it.op==="JUMPDEST")labelPc[it.label]=pc; pc+=SIZE(it.op); }
+  for(const it of items){ if(it.op==="PUSH2")it.arg=labelPc[it.target]; }
+  const tokens=[], idxAtPc={};
+  for(const it of items){
+    idxAtPc[it.pc]=tokens.length; it.tokIdx=tokens.length;
+    if(it.op==="PUSH1")tokens.push("PUSH1","0x"+it.arg.toString(16).padStart(2,"0"));
+    else if(it.op==="PUSH2")tokens.push("PUSH2","0x"+it.arg.toString(16).padStart(4,"0"));
+    else tokens.push(it.op);
+  }
+  return {tokens,idxAtPc,items};
+}
+const BYTE={STOP:0,ADD:1,MUL:2,SUB:3,SLT:0x12,SGT:0x13,EQ:0x14,CALLDATALOAD:0x35,POP:0x50,JUMP:0x56,JUMPI:0x57,JUMPDEST:0x5b,PUSH1:0x60,PUSH2:0x61,DUP1:0x80,SWAP1:0x90};
+function toBytes(tokens){
+  let out="0x",i=0;
+  while(i<tokens.length){ const t=tokens[i];
+    if(t==="PUSH1"){out+="60"+(parseInt(tokens[i+1],16)&0xff).toString(16).padStart(2,"0");i+=2;continue;}
+    if(t==="PUSH2"){out+="61"+(parseInt(tokens[i+1],16)&0xffff).toString(16).padStart(4,"0");i+=2;continue;}
+    out+=BYTE[t].toString(16).padStart(2,"0");i++;
+  } return out;
+}
+
+/* ============================================================================
+   FRAME BUILDER — turn the whole pipeline into an ordered list of visual steps.
+============================================================================ */
+function buildFrames(ast){
+  assignIds(ast);
+  const {tokens,idxAtPc,items}=compile(ast);
+  const frames=[];
+
+  /* ---- phase 1: COMPILE (shred structure into the tape) ---- */
+  for(const it of items){
+    const reveal=it.tokIdx+SIZE(it.op);
+    let note;
+    if(it.op==="PUSH1"&&it.lit) note=`<span class="k">PUSH 0x${it.arg.toString(16).padStart(2,"0")}</span> — push the literal <b>${it.arg}</b> onto the stack.`;
+    else if(it.op==="PUSH1"&&it.off) note=`<span class="k">PUSH 0x${it.arg.toString(16).padStart(2,"0")}</span> — the calldata offset for a variable.`;
+    else if(it.op==="CALLDATALOAD") note=`<span class="k">CALLDATALOAD</span> — read variable <b>${it.vn}</b> from the inputs.`;
+    else if(it.op==="ADD") note=`<span class="k">ADD</span> — combine the two operands with <b>+</b>. The nesting just collapsed into one flat opcode.`;
+    else if(it.op==="MUL") note=`<span class="k">MUL</span> — combine with <b>×</b>.`;
+    else if(it.op==="SUB") note=`<span class="k">SUB</span> — subtract (operands pre-ordered by SWAP1).`;
+    else if(it.op==="SLT") note=`<span class="k">SLT</span> — signed less-than comparison.`;
+    else if(it.op==="SGT") note=`<span class="k">SGT</span> — signed greater-than comparison.`;
+    else if(it.op==="EQ") note=`<span class="k">EQ</span> — equality test.`;
+    else if(it.op==="SWAP1") note=`<span class="k">SWAP1</span> — swap top two so EVM gets operands in its order.`;
+    else if(it.op==="PUSH2") note=`<span class="k">PUSH 0x${(it.arg||0).toString(16).padStart(4,"0")}</span> — a <b>jump address</b>. Your <code>if</code> is becoming a place to leap to.`;
+    else if(it.op==="JUMPI") note=`<span class="k">JUMPI</span> — <b>conditional jump</b>. This is your <code>if</code>, now a raw branch. No <code>if</code> survives.`;
+    else if(it.op==="JUMP") note=`<span class="k">JUMP</span> — unconditional goto, to skip the other branch.`;
+    else if(it.op==="JUMPDEST") note=`<span class="k">JUMPDEST</span> — a landing pad a jump can target.`;
+    frames.push({phase:"compile", reveal, head:it.tokIdx, astHi:it.nid, stack:null, crumb:"flattening the tree into machine code", note});
+  }
+  frames.push({phase:"compile", reveal:tokens.length, head:-1, astHi:-1, stack:null,
+    crumb:"structure destroyed", note:`Done. The tree is gone — it's now a flat line of bytes. <b>An auditor on-chain sees only this.</b> Now watch the machine rebuild it. ▶`});
+
+  /* ---- phase 2: DECOMPILE (rebuild structure, stack machine) ---- */
+  function snap(st){ return st.slice(); }
+  function range(lo,hi,ctx){
+    const st=[]; let i=lo;
+    const push=(head,note,flash)=>frames.push({phase:"decompile", reveal:tokens.length, head, astHi:-1, stack:snap(st), crumb:ctx.join(" › ")||"reading the flat stream", note, flash});
+    while(i<hi){
+      const t=tokens[i];
+      if(t==="PUSH1"){ st.push(["num",parseInt(tokens[i+1],16)]); push(i,`<span class="k">PUSH</span> — a value lands on the stack. We don't know yet if it's a literal or an address; keep it.`,"push"); i+=2; continue; }
+      if(t==="PUSH2"&&tokens[i+2]==="JUMPI"){
+        const cond=st.pop();
+        const Lt=parseInt(tokens[i+1],16), idxTrue=idxAtPc[Lt];
+        const Le=parseInt(tokens[idxTrue-2],16), idxEnd=idxAtPc[Le];
+        push(i,`<span class="k">JUMPI</span> spotted → this is a <b>conditional</b>. The condition is <code>${render(cond)}</code>. Now recover both branches by following the jumps…`,"cond");
+        const elseB=range(i+3,idxTrue-3,ctx.concat(["ELSE branch"]));
+        const thenB=range(idxTrue+1,idxEnd,ctx.concat(["THEN branch"]));
+        st.push(["if",cond,thenB,elseB]);
+        push(idxEnd,`Branches recovered. <b>Bind</b> condition + then + else into one <code>if</code> node and push it back. The structure is back.`,"merge");
+        i=idxEnd+1; continue;
+      }
+      if(t==="CALLDATALOAD"){ const off=st.pop(); st.push(["var",OFF2VAR[off[1]]]); push(i,`<span class="k">CALLDATALOAD</span> — that pushed value was an offset; it's really variable <b>${OFF2VAR[off[1]]}</b>.`,"load"); }
+      else if(t==="ADD"){ const r=st.pop(),l=st.pop(); st.push(["op","+",l,r]); push(i,`<span class="k">ADD</span> — pop the top two and <b>bind them under +</b>. We just recovered which operands belong to this operator.`,"bind"); }
+      else if(t==="MUL"){ const r=st.pop(),l=st.pop(); st.push(["op","*",l,r]); push(i,`<span class="k">MUL</span> — bind the top two under <b>×</b>.`,"bind"); }
+      else if(t==="SUB"){ const top=st.pop(),second=st.pop(); st.push(["op","-",top,second]); push(i,`<span class="k">SUB</span> — bind under <b>−</b> (order: top − second).`,"bind"); }
+      else if(t==="SLT"){ const top=st.pop(),second=st.pop(); st.push(["op","<",top,second]); push(i,`<span class="k">SLT</span> — bind under <b>&lt;</b>.`,"bind"); }
+      else if(t==="SGT"){ const top=st.pop(),second=st.pop(); st.push(["op",">",top,second]); push(i,`<span class="k">SGT</span> — bind under <b>&gt;</b>.`,"bind"); }
+      else if(t==="EQ"){ const x=st.pop(),y=st.pop(); st.push(["op","==",y,x]); push(i,`<span class="k">EQ</span> — bind under <b>==</b>.`,"bind"); }
+      else if(t==="SWAP1"){ const x=st[st.length-1]; st[st.length-1]=st[st.length-2]; st[st.length-2]=x; push(i,`<span class="k">SWAP1</span> — undo the compiler's operand reordering.`,"swap"); }
+      else if(t==="DUP1"){ st.push(st[st.length-1]); push(i,`<span class="k">DUP1</span> — duplicate the top.`,"swap"); }
+      else if(t==="POP"){ st.pop(); push(i,`<span class="k">POP</span> — discard the top (dead value).`,"swap"); }
+      i++;
+    }
+    return st[st.length-1];
+  }
+  const rebuilt=range(0,tokens.length,[]);
+  frames.push({phase:"decompile", reveal:tokens.length, head:-1, astHi:-1, stack:[rebuilt],
+    crumb:"complete", note:`<b>Rebuilt.</b> The flat jump-soup is structured code again — and we never needed the original source to do it.`, flash:"done"});
+
+  return {frames,tokens,rebuilt,hex:toBytes(tokens),ast};
+}
+
+/* ============================================================================
+   PLAYER
+============================================================================ */
+let S=null, idx=0, timer=null;
+const $=id=>document.getElementById(id);
+
+function setEx(s){ $("expr").value=s; load(); }
+function load(){
+  stop();
+  $("err").textContent="";
+  let ast;
+  try{ ast=parseSource($("expr").value); }
+  catch(e){ $("err").textContent="✗ "+e.message; $("stage").classList.add("hidden"); return; }
+  S=buildFrames(ast);
+  $("stage").classList.remove("hidden");
+  $("hex").textContent=S.hex;
+  $("treePane").innerHTML=treeHTML(S.ast);
+  $("result").textContent="—";
+  $("verdict").className="verdict"; $("verdict").textContent="Finish the run to prove correctness.";
+  $("verify").innerHTML="";
+  idx=0; renderFrame();
+}
+
+function renderFrame(){
+  const f=S.frames[idx];
+  // phase badge + crumb
+  $("phaseBadge").textContent=f.phase;
+  $("phaseBadge").className="badge "+f.phase;
+  $("crumb").innerHTML=f.crumb?("▸ "+f.crumb.replace(/(THEN|ELSE) branch/g,"<b>$&</b>")):"";
+  $("leftHd").textContent = f.phase==="compile" ? "SOURCE STRUCTURE (being shredded)" : "SOURCE STRUCTURE (the target)";
+
+  // tape
+  const tape=$("tape"); tape.innerHTML="";
+  const tk=S.tokens; let k=0;
+  while(k<tk.length){
+    const t=tk[k]; const cell=document.createElement("div");
+    let cls="cell", txt=t, span=1;
+    if(t==="PUSH1"){ cls+=" push"; txt="PUSH "+tk[k+1]; span=2; }
+    else if(t==="PUSH2"){ cls+=" ctrl"; txt="PUSH "+tk[k+1]+"→"; span=2; }
+    else if(t==="CALLDATALOAD"){ cls+=" load"; txt="LOAD-ARG"; }
+    else if(t==="JUMP"||t==="JUMPI"||t==="JUMPDEST"){ cls+=" ctrl"; }
+    else if(t==="SLT"||t==="SGT"||t==="EQ"){ cls+=" cmp"; }
+    else { cls+=" opc"; }
+    const start=k;
+    if(start>=f.reveal) cls+=" ghost";
+    if(f.head===start){ cls+= f.phase==="compile" ? " emit" : " head"; }
+    cell.className=cls; cell.textContent=txt; tape.appendChild(cell);
+    k+=span;
+  }
+
+  // tree highlight (compile phase)
+  document.querySelectorAll("#treePane .node.hi").forEach(n=>n.classList.remove("hi"));
+  if(f.phase==="compile" && f.astHi>=0){
+    const n=document.querySelector(`#treePane .node[data-id="${f.astHi}"]`);
+    if(n)n.classList.add("hi");
+  }
+
+  // stack
+  const stack=$("stack");
+  if(f.stack===null){
+    stack.innerHTML=`<div class="stack-empty">(idle — the stack fills up during the rebuild)</div>`;
+  } else if(f.stack.length===0){
+    stack.innerHTML=`<div class="stack-empty">(empty)</div>`;
+  } else {
+    stack.innerHTML=f.stack.map((a,j)=>{
+      const top=j===f.stack.length-1;
+      return `<div class="scard${top?' top':''}">${top?'<div class="stip">← top</div>':''}${treeHTML(a)}</div>`;
+    }).join("");
+  }
+
+  // ③ output, building up live as the stack assembles it
+  const res=$("result");
+  if(f.phase==="decompile" && f.stack && f.stack.length){
+    const partial = f.stack.length===1 && idx===S.frames.length-1;
+    res.classList.toggle("building", !partial);
+    res.innerHTML = `<span class="grow">${render(f.stack[f.stack.length-1])}</span>`
+      + (partial ? "" : `<span class="cursor">▌</span>`);
+  } else if(f.phase==="compile"){
+    res.classList.remove("building");
+    res.innerHTML=`<span style="color:#3d444d">(waiting — the rebuild hasn't started)</span>`;
+  }
+
+  // ticker + progress
+  $("ticker").innerHTML=f.note;
+  $("stepCount").textContent=`${idx+1} / ${S.frames.length}`;
+  $("progFill").style.width=((idx)/(S.frames.length-1)*100)+"%";
+
+  if(idx===S.frames.length-1) finish();
+}
+
+function finish(){
+  // fill result + proof
+  $("result").textContent=render(S.rebuilt);
+  const verify=$("verify"); verify.innerHTML="";
+  const rnd=()=>Math.floor(Math.random()*11)-5;
+  let allMatch=true;
+  for(let n=0;n<3;n++){
+    const env={}; VARS.forEach(v=>env[v]=rnd());
+    const a=evalAst(S.ast,env), b=evalAst(S.rebuilt,env);
+    const m=a===b; if(!m)allMatch=false;
+    const box=document.createElement("div"); box.className="vbox";
+    box.innerHTML=`<div style="color:#8b949e">${VARS.map(v=>v+"="+env[v]).join(", ")}</div>
+      <div>original → <b>${signed(a)}</b></div><div>rebuilt&nbsp; → <b>${signed(b)}</b></div>
+      <div class="${m?'ok':'bad'}">${m?'✓ match':'✗ differ'}</div>`;
+    verify.appendChild(box);
+  }
+  for(let n=0;n<60&&allMatch;n++){ const env={}; VARS.forEach(v=>env[v]=rnd()); if(evalAst(S.ast,env)!==evalAst(S.rebuilt,env))allMatch=false; }
+  const vd=$("verdict");
+  if(allMatch){ vd.className="verdict"; vd.innerHTML=`<span class="ok">PROVEN CORRECT</span> — identical on 63 random inputs (both branches of every <code>if</code>). The decompiler may commit; if even one input differed it would stay silent instead of lying.`; }
+  else { vd.className="verdict fail"; vd.innerHTML=`<span class="bad">MISMATCH</span> — would be rejected, never shown as a confident answer.`; }
+}
+
+/* controls */
+function setPlaying(on){ $("machine").classList.toggle("playing",on); $("btnPlay").textContent=on?"⏸":"▶"; }
+function togglePlay(){ if(timer){ stop(); } else { play(); } }
+function play(){
+  if(idx>=S.frames.length-1){ idx=0; renderFrame(); }
+  setPlaying(true);
+  const tick=()=>{
+    if(idx>=S.frames.length-1){ stop(); return; }
+    idx++; renderFrame();
+    timer=setTimeout(tick, +$("speed").value);
+  };
+  timer=setTimeout(tick, +$("speed").value);
+}
+function stop(){ if(timer){ clearTimeout(timer); timer=null; } setPlaying(false); }
+function stepFwd(){ stop(); if(idx<S.frames.length-1){ idx++; renderFrame(); } }
+function stepBack(){ stop(); if(idx>0){ idx--; renderFrame(); } }
+function restart(){ stop(); idx=0; renderFrame(); }
+function toEnd(){ stop(); idx=S.frames.length-1; renderFrame(); }
+function seekBar(e){ stop(); const r=e.currentTarget.getBoundingClientRect(); const p=(e.clientX-r.left)/r.width; idx=Math.max(0,Math.min(S.frames.length-1,Math.round(p*(S.frames.length-1)))); renderFrame(); }
+
+$("expr").addEventListener("keydown",e=>{ if(e.key==="Enter")load(); });
+load();
+
+/* ============================================================ *
+ *  REAL-TIME VISIT TRACKING  (GoatCounter — free, no card)
+ *  ------------------------------------------------------------
+ *  ONE-TIME SETUP:
+ *   1. Make a free account at https://www.goatcounter.com
+ *      (choose a code, e.g. "neuraldecompiler" -> your dashboard
+ *       lives at https://neuraldecompiler.goatcounter.com)
+ *   2. In GoatCounter Settings, tick "Allow adding visitor counts
+ *      to your website" (lets the live number below display).
+ *   3. Put your code in GC_CODE below. That's it — every visit is
+ *      then tracked live in your dashboard (it has a Realtime view).
+ * ============================================================ */
+const GC_CODE = "gursimran";   // <-- your GoatCounter code (gursimran.goatcounter.com)
+
+if (GC_CODE && GC_CODE !== "YOURCODE") {
+  // 1) send the pageview to GoatCounter (real-time dashboard)
+  const s = document.createElement("script");
+  s.async = true;
+  s.src = "//gc.zgo.at/count.js";
+  s.setAttribute("data-goatcounter", `https://${GC_CODE}.goatcounter.com/count`);
+  document.body.appendChild(s);
+  // 2) show the running total on the page itself
+  fetch(`https://${GC_CODE}.goatcounter.com/counter/TOTAL.json`)
+    .then(r => r.json())
+    .then(d => { const el = $("visits"); if (el) el.textContent = `${d.count} visits`; })
+    .catch(() => {});
+}
+</script>
+</body>
+</html>
