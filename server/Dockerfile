@@ -8,8 +8,11 @@ WORKDIR /app
 COPY server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# the from-scratch engine the server imports
-COPY model.py autograd.py dataset.py cflang.py cfevm.py cfdataset.py ./
+# the from-scratch engine the server imports.
+# dataset.py defines the pickled Vocab class, and it imports lang/obfuscate/vm
+# at module load — so those must be present for the checkpoint to unpickle.
+COPY model.py autograd.py dataset.py lang.py obfuscate.py vm.py \
+     cflang.py cfevm.py cfdataset.py ./
 # the API server, the landing page, and the trained checkpoint
 COPY server/app.py ./server/app.py
 COPY server/static ./server/static
