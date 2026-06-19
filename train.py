@@ -38,17 +38,20 @@ def evaluate(model, pairs, src_vocab, tgt_vocab, rng):
     return exact / n, equiv / n
 
 
-def verified_decode(model, code, src_vocab, tgt_vocab, np_rng, py_rng, k=8):
+def verified_decode(model, code, src_vocab, tgt_vocab, np_rng, py_rng, beam=8, k=8):
     """Emit only a decompilation we can PROVE matches the bytecode.
 
-    Try the greedy guess first; if it doesn't verify against the actual bytecode,
-    draw up to k sampled candidates and return the first that does. Returns
-    (tokens, verified?). If nothing verifies we still return the last guess but
-    flag it as unverified — in a real tool you'd hand that to a human."""
+    Search a pool of candidates and return the first that reproduces the
+    bytecode's outputs on random inputs: beam search first (deterministic,
+    high-probability), then stochastic sampling as a fallback for extra
+    diversity. Returns (tokens, verified?). If nothing verifies we still return
+    the last guess but flag it unverified — a real tool hands that to a human."""
     src_ids = src_vocab.encode(code)
-    cand = tgt_vocab.decode(model.greedy(src_ids))
-    if dataset.verified_equivalent(code, " ".join(cand), py_rng):
-        return cand, True
+    cand = None
+    for ids in model.beam_search(src_ids, beam=beam):
+        cand = tgt_vocab.decode(ids)
+        if dataset.verified_equivalent(code, " ".join(cand), py_rng):
+            return cand, True
     for _ in range(k):
         cand = tgt_vocab.decode(model.sample(src_ids, np_rng))
         if dataset.verified_equivalent(code, " ".join(cand), py_rng):
